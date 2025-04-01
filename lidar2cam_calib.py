@@ -16,6 +16,11 @@ import rosbag
 class LidarProjectionApp(QMainWindow):
     def __init__(self, bag_file=None, camera_model=None, intrinsics=None):
         super().__init__()
+        # 添加预分配内存
+        self.points_hom = None  # 齐次坐标预分配
+        self.points_cam = None  # 相机坐标系预分配
+        self.color_map = None   # 颜色映射表预计算
+
         self.bag_file = bag_file
         self.camera_model = camera_model
         self.intrinsics = intrinsics
@@ -291,28 +296,43 @@ class LidarProjectionApp(QMainWindow):
         if hasattr(self, 'frame_input'):
             self.frame_input.setValue(frame_idx)
         
-        # 加载当前帧的点云和图像
-        self.pc_msg = self.pc_msgs[frame_idx]
-        self.img_msg = self.img_msgs[frame_idx]
-        
-        # 确保点云数据被正确加载
-        self.points_lidar = np.array(list(point_cloud2.read_points(
-            self.pc_msg, field_names=("x", "y", "z"), skip_nans=True)))
-        
-        bridge = CvBridge()
         try:
-            self.img = bridge.compressed_imgmsg_to_cv2(self.img_msg, "bgr8")
-        except AttributeError:
-            self.img = bridge.imgmsg_to_cv2(self.img_msg, "bgr8")
-        
-        # 检查内参是否已设置
-        if not hasattr(self, 'intrinsics') or self.intrinsics is None:
-            QMessageBox.critical(self, "Error", "Camera intrinsics not set!")
+            # 加载当前帧的点云和图像
+            self.pc_msg = self.pc_msgs[frame_idx]
+            self.img_msg = self.img_msgs[frame_idx]
+            
+            # 确保点云数据被正确加载
+            self.points_lidar = np.array(list(point_cloud2.read_points(
+                self.pc_msg, field_names=("x", "y", "z"), skip_nans=True)))
+            if len(self.points_lidar) == 0:
+                raise ValueError("Empty point cloud data")
+            
+            bridge = CvBridge()
+            try:
+                self.img = bridge.compressed_imgmsg_to_cv2(self.img_msg, "bgr8")
+            except AttributeError:
+                self.img = bridge.imgmsg_to_cv2(self.img_msg, "bgr8")
+            
+            if self.img is None:
+                raise ValueError("Failed to load image")
+                
+            # 检查内参是否已设置
+            if not hasattr(self, 'intrinsics') or self.intrinsics is None:
+                raise ValueError("Camera intrinsics not set")
+                
+            # 预计算齐次坐标
+            self.points_hom = np.hstack([self.points_lidar, np.ones((len(self.points_lidar), 1))])
+            
+            # 预计算颜色映射表
+            self.color_map = cv2.applyColorMap(
+                np.arange(256, dtype=np.uint8), 
+                cv2.COLORMAP_JET
+            ).squeeze()
+            
+        except Exception as e:
+            QMessageBox.critical(self, "Error", f"Failed to load frame data: {str(e)}")
             return
-        
-        # 只有在UI控件已创建且数据加载完成时才更新投影
-        if hasattr(self, 'image_label') and self.points_lidar is not None:
-            self.update_projection()
+
 
     def change_frame(self, frame_idx):
         if frame_idx != self.current_frame:
@@ -408,8 +428,10 @@ class LidarProjectionApp(QMainWindow):
 
     def update_projection(self):
         try:
-            # 添加检查确保points_lidar已初始化
-            if not hasattr(self, 'points_lidar') or self.points_lidar is None:
+            # 添加检查确保必要数据已初始化
+            if (not hasattr(self, 'points_lidar') or self.points_lidar is None or
+                not hasattr(self, 'img') or self.img is None or
+                not hasattr(self, 'intrinsics') or self.intrinsics is None):
                 return
                 
             # 获取用户输入的参数
@@ -420,46 +442,53 @@ class LidarProjectionApp(QMainWindow):
             pitch = np.deg2rad(self.pitch_input.findChild(QDoubleSpinBox).value())
             yaw = np.deg2rad(self.yaw_input.findChild(QDoubleSpinBox).value())
             
-            # 创建旋转矩阵
-            rot = Rotation.from_euler('xyz', [roll, pitch, yaw])
-            quat = rot.as_quat()
-            self.quat_label.setText(f"Quaternion: [{quat[0]:.3f}, {quat[1]:.3f}, {quat[2]:.3f}, {quat[3]:.3f}]")
-            rot = rot.as_matrix()
-
-            # 创建变换矩阵
-            T = np.eye(4)
-            T[:3, :3] = rot
-            T[:3, 3] = [dx, dy, dz]
+            # 直接计算旋转矩阵，避免创建Rotation对象
+            cr, sr = np.cos(roll), np.sin(roll)
+            cp, sp = np.cos(pitch), np.sin(pitch)
+            cy, sy = np.cos(yaw), np.sin(yaw)
             
-            # 坐标变换
-            points_hom = np.hstack([self.points_lidar, np.ones((len(self.points_lidar), 1))])
-            points_cam = (T @ points_hom.T).T[:, :3]
+            rot = np.array([
+                [cy*cp, cy*sp*sr - sy*cr, cy*sp*cr + sy*sr],
+                [sy*cp, sy*sp*sr + cy*cr, sy*sp*cr - cy*sr],
+                [-sp, cp*sr, cp*cr]
+            ])
+
+            # 计算四元数并更新显示
+            # 使用scipy的Rotation从旋转矩阵计算四元数
+            quat = Rotation.from_matrix(rot).as_quat()
+            self.quat_label.setText(f"Quaternion: [{quat[0]:.3f}, {quat[1]:.3f}, {quat[2]:.3f}, {quat[3]:.3f}]")
+            
+            # 直接计算变换后的坐标
+            if self.points_lidar is not None:
+                self.points_cam = (rot @ self.points_lidar.T).T + np.array([dx, dy, dz])
             
             # 投影到图像
-            uv, valid_indices = self.ds_project(points_cam, self.intrinsics)
+            if self.points_cam is not None:
+                uv, valid_indices = self.ds_project(self.points_cam, self.intrinsics)
+            else:
+                uv, valid_indices = np.array([]), []
             
-            # 创建图像副本
             img_copy = self.img.copy()
             
-            if len(valid_indices) > 0:
+            if len(valid_indices) > 0 and uv.size > 0:
                 uv = uv.astype(int)
                 points_valid = self.points_lidar[valid_indices]
                 distances = np.linalg.norm(points_valid, axis=1)
                 
-                min_dist = 0.0
-                max_dist = 10.0
-                normalized_dist = np.clip((distances - min_dist) / (max_dist - min_dist), 0.0, 1.0)
+                # 使用预计算的颜色映射表
+                norm_dist = np.clip((distances - 0.0) / (10.0 - 0.0), 0.0, 1.0)
+                color_indices = (norm_dist * 255).astype(np.uint8)
                 
-                colors = cv2.applyColorMap(
-                    (normalized_dist * 255).astype(np.uint8),
-                    cv2.COLORMAP_JET
-                ).squeeze()
+                # 使用向量化操作绘制点
+                mask = (uv[:,0] >= 0) & (uv[:,0] < img_copy.shape[1]) & \
+                       (uv[:,1] >= 0) & (uv[:,1] < img_copy.shape[0])
                 
-                for (u, v), color in zip(uv, colors):
-                    if 0 <= u < img_copy.shape[1] and 0 <= v < img_copy.shape[0]:
-                        cv2.circle(img_copy, (u, v), 2, color.tolist(), -1)
+                uv_valid = uv[mask]
+                colors = self.color_map[color_indices[mask]]
                 
-                img_copy = self.add_right_color_scale(img_copy, min_dist, max_dist)
+                # 批量绘制点，加大点的大小
+                for (u, v), color in zip(uv_valid, colors):
+                    cv2.circle(img_copy, (u, v), 2, color.tolist(), -1)  # 点大小
             
             # 显示图像
             height, width = img_copy.shape[:2]
