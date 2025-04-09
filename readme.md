@@ -57,6 +57,6 @@ When most frames show good LiDAR-camera alignment, click ​**Save Extrinsic Par
 
 ## Future work
 
-- Support more projection and distortion models (pinhole, omni, EUCM | radtan, equi, FOV), though currently only ds-none is implemented.
-- Add point cloud and camera pose visualization and optimize UI
+- Support more projection and distortion models (pinhole, omni, eucm | radtan, equi, fov), though currently only ds-none is implemented.
+- Add point cloud and camera pose visualization and optimize UI.
 - Add LiDAR-camera hardware sync trigger tutorial and implement point cloud de-distortion code.

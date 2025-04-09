@@ -46,7 +46,7 @@ class LidarProjectionApp(QMainWindow):
             for topic, msg, t in bag.read_messages():
                 if msg._type == 'sensor_msgs/PointCloud2':
                     self.pc_msgs.append(msg)
-                elif msg._type == 'sensor_msgs/CompressedImage' or msg._type == 'sensor_msgs/Image':
+                elif (msg._type == 'sensor_msgs/CompressedImage' or msg._type == 'sensor_msgs/Image'):
                     self.img_msgs.append(msg)
                     
             if not self.pc_msgs:
