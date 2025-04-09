@@ -332,6 +332,10 @@ class LidarProjectionApp(QMainWindow):
         except Exception as e:
             QMessageBox.critical(self, "Error", f"Failed to load frame data: {str(e)}")
             return
+        
+        # 只有在UI控件已创建且数据加载完成时才更新投影
+        if hasattr(self, 'image_label') and self.points_lidar is not None:
+            self.update_projection()
 
 
     def change_frame(self, frame_idx):
