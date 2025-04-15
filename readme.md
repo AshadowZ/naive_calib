@@ -37,13 +37,22 @@ Then, slowly move the device in an area with complex geometric structures for ab
 
 ### Calibration
 
+pinhole-radtan:
+
 ```
-python main.py [ROS bag path] [cam model] [fx] [fy] [cx] [cy] ([xi] [alpha]) ([k1] [k2] [r1] [r2])
+python lidar2cam_calib.py bag_file pinhole-radtan fx fy cx cy k1 k2 p1 p2
+```
+ds-none:
+
+```
+python lidar2cam_calib.py bag_file ds fx fy cx cy xi alpha
 ```
 
 like:
 
 ``` 
+python3 lidar2cam_calib.py ~/bag/4.14/calib.bag pinhole-radtan 1390.9387500713492 1392.8029594556217 637.8938889765367 483.14151449928954 -0.0940796259181304 0.1981182507080507 0.00047255100645406415 0.0009985666881676147
+
 python3 lidar2cam_calib.py os0-fisheye-calib.bag ds 300.64792784590804 300.68442119906337 569.9991935258806 550.0942167886128 -0.17644991253371645 0.6700750864827676
 ```
 
@@ -57,6 +66,6 @@ When most frames show good LiDAR-camera alignment, click ​**Save Extrinsic Par
 
 ## Future work
 
-- Support more projection and distortion models (pinhole, omni, eucm | radtan, equi, fov), though currently only ds-none is implemented.
+- Support more projection and distortion models (pinhole, omni, eucm | radtan, equi, fov), though currently only ds-none and pinhole-radtan is implemented.
 - Add point cloud and camera pose visualization and optimize UI.
 - Add LiDAR-camera hardware sync trigger tutorial and implement point cloud de-distortion code.

@@ -402,32 +402,76 @@ class LidarProjectionApp(QMainWindow):
         super().resizeEvent(event)
 
     def ds_project(self, points_cam, intrinsics):
+        """支持双球面(ds)和pinhole-radtan两种相机模型的投影"""
         fx = intrinsics["fx"]
         fy = intrinsics["fy"]
         cx = intrinsics["cx"]
         cy = intrinsics["cy"]
-        xi = intrinsics["xi"]
-        alpha = intrinsics["alpha"]
         
         uv = []
         valid_indices = []
-        for i, p in enumerate(points_cam):
-            x, y, z = p
-            if z <= 0:
-                continue
-            
-            d1 = np.sqrt(x**2 + y**2 + z**2)
-            d2 = np.sqrt(x**2 + y**2 + (xi*d1 + z)**2)
-            k = alpha * d2 + (1 - alpha)*(xi*d1 + z)
-            
-            if k <= 0:
-                continue
-            
-            u = (x / k) * fx + cx
-            v = (y / k) * fy + cy
-            uv.append((u, v))
-            valid_indices.append(i)
         
+        if self.camera_model == "ds":
+            # 双球面模型投影
+            xi = intrinsics["xi"]
+            alpha = intrinsics["alpha"]
+            
+            for i, p in enumerate(points_cam):
+                x, y, z = p
+                if z <= 0:
+                    continue
+                    
+                d1 = np.sqrt(x**2 + y**2 + z**2)
+                d2 = np.sqrt(x**2 + y**2 + (xi*d1 + z)**2)
+                k = alpha * d2 + (1 - alpha)*(xi*d1 + z)
+                
+                if k <= 0:
+                    continue
+                    
+                u = (x / k) * fx + cx
+                v = (y / k) * fy + cy
+                uv.append((u, v))
+                valid_indices.append(i)
+                
+        elif self.camera_model == "pinhole-radtan":
+            # pinhole-radtan模型投影
+            k1 = intrinsics.get("k1", 0)
+            k2 = intrinsics.get("k2", 0)
+            p1 = intrinsics.get("p1", 0)
+            p2 = intrinsics.get("p2", 0)
+            
+            for i, p in enumerate(points_cam):
+                x, y, z = p
+                if z <= 0:
+                    continue
+                    
+                # 归一化平面坐标
+                xn = x / z
+                yn = y / z
+                
+                # 径向畸变
+                r2 = xn*xn + yn*yn
+                radial_dist = 1 + k1*r2 + k2*r2*r2
+                
+                # 切向畸变
+                xy = xn * yn
+                tangential_x = 2*p1*xy + p2*(r2 + 2*xn*xn)
+                tangential_y = p1*(r2 + 2*yn*yn) + 2*p2*xy
+                
+                # 应用畸变
+                xd = xn * radial_dist + tangential_x
+                yd = yn * radial_dist + tangential_y
+                
+                # 投影到像素平面
+                u = xd * fx + cx
+                v = yd * fy + cy
+                if 0 <= u < self.img.shape[1] and 0 <= v < self.img.shape[0]:
+                    uv.append((u, v))
+                    valid_indices.append(i)
+                    
+        else:
+            raise ValueError(f"Unsupported camera model: {self.camera_model}")
+            
         return np.array(uv), valid_indices
 
     def update_projection(self):
@@ -474,25 +518,31 @@ class LidarProjectionApp(QMainWindow):
             
             img_copy = self.img.copy()
             
-            if len(valid_indices) > 0 and uv.size > 0:
-                uv = uv.astype(int)
-                points_valid = self.points_lidar[valid_indices]
-                distances = np.linalg.norm(points_valid, axis=1)
-                
-                # 使用预计算的颜色映射表
-                norm_dist = np.clip((distances - 0.0) / (10.0 - 0.0), 0.0, 1.0)
-                color_indices = (norm_dist * 255).astype(np.uint8)
-                
-                # 使用向量化操作绘制点
-                mask = (uv[:,0] >= 0) & (uv[:,0] < img_copy.shape[1]) & \
-                       (uv[:,1] >= 0) & (uv[:,1] < img_copy.shape[0])
-                
-                uv_valid = uv[mask]
-                colors = self.color_map[color_indices[mask]]
-                
-                # 批量绘制点，加大点的大小
-                for (u, v), color in zip(uv_valid, colors):
-                    cv2.circle(img_copy, (u, v), 2, color.tolist(), -1)  # 点大小
+            # 检查是否有点云点被成功投影到图像上
+            if not valid_indices:
+                print("No lidar points can be projected onto the current image. "
+                      "The current extrinsic parameters result in no overlap between "
+                      "the point cloud and the camera's field of view.")
+            else:
+                if len(valid_indices) > 0 and uv.size > 0:
+                    uv = uv.astype(int)
+                    points_valid = self.points_lidar[valid_indices]
+                    distances = np.linalg.norm(points_valid, axis=1)
+                    
+                    # 使用预计算的颜色映射表
+                    norm_dist = np.clip((distances - 0.0) / (10.0 - 0.0), 0.0, 1.0)
+                    color_indices = (norm_dist * 255).astype(np.uint8)
+                    
+                    # 使用向量化操作绘制点
+                    mask = (uv[:,0] >= 0) & (uv[:,0] < img_copy.shape[1]) & \
+                           (uv[:,1] >= 0) & (uv[:,1] < img_copy.shape[0])
+                    
+                    uv_valid = uv[mask]
+                    colors = self.color_map[color_indices[mask]]
+                    
+                    # 批量绘制点，加大点的大小
+                    for (u, v), color in zip(uv_valid, colors):
+                        cv2.circle(img_copy, (u, v), 2, color.tolist(), -1)  # 点大小
             
             # 显示图像
             height, width = img_copy.shape[:2]
@@ -509,6 +559,7 @@ class LidarProjectionApp(QMainWindow):
             
         except Exception as e:
             print(f"Error in projection: {str(e)}")
+
 
     def add_right_color_scale(self, img, min_val, max_val):
         height, width = img.shape[:2]
@@ -573,20 +624,44 @@ class LidarProjectionApp(QMainWindow):
 
 def main():
     if len(sys.argv) < 8:
-        print("Usage: python script.py <rosbag_file> <camera_model> <fx> <fy> <cx> <cy> <xi> <alpha>")
-        print("Example: python3 test4.py mid-cam-cali.bag ds 301.3403358317853 301.2014464145018 556.7394553845984 531.3838845784604 -0.175461293087452 0.6673152472283514")
+        print("Usage: python script.py <rosbag_file> <camera_model> <fx> <fy> <cx> <cy> [model_params...]")
+        print("For ds model: python script.py bag_file ds fx fy cx cy xi alpha")
+        print("For pinhole-radtan model: python script.py bag_file pinhole-radtan fx fy cx cy k1 k2 p1 p2")
         sys.exit(1)
     
     bag_file_name = sys.argv[1]
     camera_model = sys.argv[2]
+    
+    # 基本内参
     intrinsics = {
         "fx": float(sys.argv[3]),
         "fy": float(sys.argv[4]),
         "cx": float(sys.argv[5]),
-        "cy": float(sys.argv[6]),
-        "xi": float(sys.argv[7]),
-        "alpha": float(sys.argv[8])
+        "cy": float(sys.argv[6])
     }
+    
+    # 根据相机模型添加特定参数
+    if camera_model == "ds":
+        if len(sys.argv) < 9:
+            print("DS model requires xi and alpha parameters")
+            sys.exit(1)
+        intrinsics.update({
+            "xi": float(sys.argv[7]),
+            "alpha": float(sys.argv[8])
+        })
+    elif camera_model == "pinhole-radtan":
+        if len(sys.argv) < 11:
+            print("Pinhole-radtan model requires k1, k2, p1, p2 parameters")
+            sys.exit(1)
+        intrinsics.update({
+            "k1": float(sys.argv[7]),
+            "k2": float(sys.argv[8]),
+            "p1": float(sys.argv[9]),
+            "p2": float(sys.argv[10])
+        })
+    else:
+        print(f"Unsupported camera model: {camera_model}")
+        sys.exit(1)
     
     app = QApplication(sys.argv)
     ex = LidarProjectionApp(bag_file_name, camera_model, intrinsics)
