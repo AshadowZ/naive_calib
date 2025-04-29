@@ -11,6 +11,8 @@ from sensor_msgs import point_cloud2
 from cv_bridge import CvBridge
 from scipy.spatial.transform import Rotation
 import rosbag
+from sensor_msgs.msg import PointCloud2, Image, CompressedImage
+import bisect
 
 
 class LidarProjectionApp(QMainWindow):
@@ -40,17 +42,15 @@ class LidarProjectionApp(QMainWindow):
     # def load_bag_data(self):
     #     if not self.bag_file:
     #         raise ValueError("No bag file provided")
-            
+
     #     bag = rosbag.Bag(self.bag_file, 'r')
     #     try:
     #         # 存储所有点云和图像消息
     #         for topic, msg, t in bag.read_messages():
     #             if msg._type == 'sensor_msgs/PointCloud2':
     #                 self.pc_msgs.append(msg)
-    #                 self.pc_timestamps.append(msg.header.stamp.to_sec())
     #             elif (msg._type == 'sensor_msgs/CompressedImage' or msg._type == 'sensor_msgs/Image'):
     #                 self.img_msgs.append(msg)
-    #                 self.img_timestamps.append(msg.header.stamp.to_sec())
                     
     #         if not self.pc_msgs:
     #             raise ValueError("No point cloud messages found in the bag")
@@ -59,107 +59,81 @@ class LidarProjectionApp(QMainWindow):
             
     #         # 每次读取后打印当前数量
     #         print(f"点云数量: {len(self.pc_msgs)}, 图像数量: {len(self.img_msgs)}")
-
-    #         # 打印前20个点云和图像的时间戳
-    #         print("前20个点云的时间戳:")
-    #         for timestamp in self.pc_timestamps[:20]:
-    #             print(timestamp)
-            
-    #         print("前20个图像的时间戳:")
-    #         for timestamp in self.img_timestamps[:20]:
-    #             print(timestamp)
             
     #         # 确保时间同步，这里简化处理，假设顺序匹配
     #         self.min_frames = min(len(self.pc_msgs), len(self.img_msgs))
     #     finally:
     #         bag.close()
 
-    def load_bag_data(self):
+    def load_bag_data(self, time_tolerance=0.05, img_time_bias=0.1):
+        """
+        Load and timestamp-match point cloud and image messages from a ROS bag based on message header timestamps.
+        为图像时间戳增加默认偏置 img_time_bias（秒）。
+        :param time_tolerance: Maximum allowed time difference (in seconds) for matching.
+        :param img_time_bias: Bias (in seconds) to add to each image timestamp.
+        """
         if not self.bag_file:
             raise ValueError("No bag file provided")
-        
-        # 清空之前的数据
-        self.pc_msgs = []
-        self.img_msgs = []
-        
-        # 临时存储所有消息
-        pc_msgs_temp = []
-        pc_timestamps_temp = []
-        img_msgs_temp = []
-        img_timestamps_temp = []
-        
-        bag = rosbag.Bag(self.bag_file, 'r')
-        try:
-            # 读取所有点云和图像消息
-            for topic, msg, t in bag.read_messages():
-                if msg._type == 'sensor_msgs/PointCloud2':
-                    pc_msgs_temp.append(msg)
-                    pc_timestamps_temp.append(msg.header.stamp.to_sec())
-                elif (msg._type == 'sensor_msgs/CompressedImage' or 
-                    msg._type == 'sensor_msgs/Image'):
-                    img_msgs_temp.append(msg)
-                    img_timestamps_temp.append(msg.header.stamp.to_sec())
-                    
-            if not pc_msgs_temp:
-                raise ValueError("No point cloud messages found in the bag")
-            if not img_msgs_temp:
-                raise ValueError("No image messages found in the bag")
-            
-            # 打印原始数量
-            print(f"原始点云数量: {len(pc_msgs_temp)}, 原始图像数量: {len(img_msgs_temp)}")
-            
-            # # 打印前20个时间戳
-            # print("前20个点云的时间戳:")
-            # for timestamp in pc_timestamps_temp[:20]:
-            #     print(timestamp)
-            
-            # print("前20个图像的时间戳:")
-            # for timestamp in img_timestamps_temp[:20]:
-            #     print(timestamp)
-            
-            # 时间戳对齐
-            self._align_messages(pc_msgs_temp, pc_timestamps_temp,
-                            img_msgs_temp, img_timestamps_temp)
-            
-            # 打印对齐后的数量
-            print(f"对齐后的点云-图像对数量: {len(self.pc_msgs)}")
-            
-        finally:
-            bag.close()
 
-    def _align_messages(self, pc_msgs, pc_timestamps, img_msgs, img_timestamps):
-        """按时间戳对齐点云和图像消息"""
-        # 设置时间戳匹配阈值（单位：秒）
-        time_threshold = 0.01  # 10毫秒
-        IMAGE_TIME_OFFSET = 0.2  # 图像时间戳偏置量
-        
-        pc_idx = 0
-        img_idx = 0
-        aligned_pairs = 0
-        
-        while pc_idx < len(pc_timestamps) and img_idx < len(img_timestamps):
-            pc_time = pc_timestamps[pc_idx]
-            img_time = img_timestamps[img_idx] + IMAGE_TIME_OFFSET
-            time_diff = abs(pc_time - img_time)
-            
-            if time_diff < time_threshold:
-                # 匹配成功，保存这对数据
-                self.pc_msgs.append(pc_msgs[pc_idx])
-                self.img_msgs.append(img_msgs[img_idx])
-                aligned_pairs += 1
-                pc_idx += 1
-                img_idx += 1
-            elif pc_time < img_time:
-                # 点云时间戳较早，跳过这个点云
-                pc_idx += 1
-            else:
-                # 图像时间戳较早，跳过这个图像
-                img_idx += 1
-        
-        self.min_frames = aligned_pairs
-        print(f"成功对齐 {aligned_pairs} 对点云-图像数据")
-        print(f"舍弃 {len(pc_msgs) - aligned_pairs} 个未对齐的点云")
-        print(f"舍弃 {len(img_msgs) - aligned_pairs} 个未对齐的图像")
+        all_pc = []  # list of (timestamp, msg)
+        all_img = []  # list of (timestamp, msg)
+
+        with rosbag.Bag(self.bag_file, 'r') as bag:
+            for topic, msg, _ in bag.read_messages():
+                # 使用消息头时间戳
+                if not hasattr(msg, 'header') or msg.header.stamp is None:
+                    continue
+                ts = msg.header.stamp.to_sec()
+
+                if msg._type == 'sensor_msgs/PointCloud2':
+                    all_pc.append((ts, msg))
+                elif msg._type in ('sensor_msgs/Image', 'sensor_msgs/CompressedImage'):
+                    # 对图像时间戳增加偏置
+                    ts_img = ts + img_time_bias
+                    all_img.append((ts_img, msg))
+
+        total_pc = len(all_pc)
+        total_img = len(all_img)
+        print(f"Total point cloud messages: {total_pc}")
+        print(f"Total image messages (with bias): {total_img}")
+
+        if total_pc == 0:
+            raise ValueError("No point cloud messages found in the bag. 请确认 PointCloud2 的 topic 和类型")
+        if total_img == 0:
+            raise ValueError("No image messages found in the bag. 请确认 Image/CompressedImage 的 topic 和类型")
+
+        # 按时间戳排序
+        all_pc.sort(key=lambda x: x[0])
+        all_img.sort(key=lambda x: x[0])
+
+        img_times = [ts for ts, _ in all_img]
+        matched_pc = []
+        matched_img = []
+
+        for pc_ts, pc_msg in all_pc:
+            idx = bisect.bisect_left(img_times, pc_ts)
+            candidates = []
+            if idx < len(img_times):
+                candidates.append((abs(img_times[idx] - pc_ts), idx))
+            if idx > 0:
+                candidates.append((abs(img_times[idx-1] - pc_ts), idx-1))
+            if not candidates:
+                continue
+            dt, best_idx = min(candidates, key=lambda x: x[0])
+            if dt <= time_tolerance:
+                matched_pc.append(pc_msg)
+                matched_img.append(all_img[best_idx][1])
+
+        matched_count = len(matched_pc)
+        print(f"Matched point cloud-image pairs: {matched_count}")
+
+        if matched_count == 0:
+            raise ValueError("No synchronized frames found within tolerance. 尝试增大 time_tolerance 或调整 img_time_bias")
+
+        self.pc_msgs = matched_pc
+        self.img_msgs = matched_img
+        self.min_frames = matched_count
+
 
     def initUI(self):
         self.setWindowTitle('Lidar to Camera Projection - Multi Frame')
