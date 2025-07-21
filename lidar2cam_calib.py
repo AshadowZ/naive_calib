@@ -65,7 +65,7 @@ class LidarProjectionApp(QMainWindow):
     #     finally:
     #         bag.close()
 
-    def load_bag_data(self, time_tolerance=0.05, img_time_bias=0.1):
+    def load_bag_data(self, time_tolerance=0.02, img_time_bias=0.0):
         """
         Load and timestamp-match point cloud and image messages from a ROS bag based on message header timestamps.
         为图像时间戳增加默认偏置 img_time_bias（秒）。
@@ -109,6 +109,7 @@ class LidarProjectionApp(QMainWindow):
         img_times = [ts for ts, _ in all_img]
         matched_pc = []
         matched_img = []
+        matched_timestamps = []  # 存储匹配的时间戳对
 
         for pc_ts, pc_msg in all_pc:
             idx = bisect.bisect_left(img_times, pc_ts)
@@ -123,9 +124,15 @@ class LidarProjectionApp(QMainWindow):
             if dt <= time_tolerance:
                 matched_pc.append(pc_msg)
                 matched_img.append(all_img[best_idx][1])
+                matched_timestamps.append((pc_ts, img_times[best_idx], dt))  # 保存时间戳对和时间差
 
         matched_count = len(matched_pc)
         print(f"Matched point cloud-image pairs: {matched_count}")
+
+        # 打印前8对匹配的时间戳
+        print("\nFirst 8 matched pairs (point cloud timestamp | image timestamp | time difference):")
+        for i, (pc_ts, img_ts, dt) in enumerate(matched_timestamps[:8]):
+            print(f"Pair {i+1}: PC={pc_ts:.6f} | IMG={img_ts:.6f} | Δt={dt:.6f}s")
 
         if matched_count == 0:
             raise ValueError("No synchronized frames found within tolerance. 尝试增大 time_tolerance 或调整 img_time_bias")
@@ -233,6 +240,33 @@ class LidarProjectionApp(QMainWindow):
         rot_layout.addWidget(self.quat_label)
 
         rot_group.setLayout(rot_layout)
+        
+        # 在控制面板中添加距离范围控制（放在step_group后面）
+        dist_group = QGroupBox("Distance Range (m)")
+        dist_layout = QHBoxLayout()
+        
+        min_dist_label = QLabel("Min Dist:")
+        self.min_dist_input = QDoubleSpinBox()
+        self.min_dist_input.setRange(0.0, 100.0)
+        self.min_dist_input.setValue(0.0)
+        self.min_dist_input.setDecimals(1)
+        self.min_dist_input.valueChanged.connect(self.update_projection)
+        
+        max_dist_label = QLabel("Max Dist:")
+        self.max_dist_input = QDoubleSpinBox()
+        self.max_dist_input.setRange(0.1, 100.0)
+        self.max_dist_input.setValue(10.0)
+        self.max_dist_input.setDecimals(1)
+        self.max_dist_input.valueChanged.connect(self.update_projection)
+        
+        dist_layout.addWidget(min_dist_label)
+        dist_layout.addWidget(self.min_dist_input)
+        dist_layout.addWidget(max_dist_label)
+        dist_layout.addWidget(self.max_dist_input)
+        dist_group.setLayout(dist_layout)
+        
+        # 将距离范围控件插入到布局中（例如放在step_group后面）
+        control_layout.insertWidget(2, dist_group)  # 调整插入位置为适合你的UI布局
         
         # 添加保存按钮
         save_group = QGroupBox("Save Extrinsic")
@@ -385,9 +419,12 @@ class LidarProjectionApp(QMainWindow):
             
             bridge = CvBridge()
             try:
-                self.img = bridge.compressed_imgmsg_to_cv2(self.img_msg, "bgr8")
-            except AttributeError:
-                self.img = bridge.imgmsg_to_cv2(self.img_msg, "bgr8")
+                if 'CompressedImage' in self.img_msg._type:
+                    self.img = bridge.compressed_imgmsg_to_cv2(self.img_msg, "bgr8")
+                else:
+                    self.img = bridge.imgmsg_to_cv2(self.img_msg, "bgr8")
+            except Exception as e:
+                print(f"Conversion failed: {str(e)}")
             
             if self.img is None:
                 raise ValueError("Failed to load image")
@@ -600,13 +637,22 @@ class LidarProjectionApp(QMainWindow):
                       "The current extrinsic parameters result in no overlap between "
                       "the point cloud and the camera's field of view.")
             else:
+                # 获取用户设置的距离范围
+                min_dist = self.min_dist_input.value()
+                max_dist = self.max_dist_input.value()
+                
+                # 确保最大距离大于最小距离
+                if max_dist <= min_dist:
+                    max_dist = min_dist + 0.1
+                    self.max_dist_input.setValue(max_dist)
+                
                 if len(valid_indices) > 0 and uv.size > 0:
                     uv = uv.astype(int)
                     points_valid = self.points_lidar[valid_indices]
                     distances = np.linalg.norm(points_valid, axis=1)
                     
-                    # 使用预计算的颜色映射表
-                    norm_dist = np.clip((distances - 0.0) / (10.0 - 0.0), 0.0, 1.0)
+                    # 使用用户设置的距离范围进行归一化
+                    norm_dist = np.clip((distances - min_dist) / (max_dist - min_dist), 0.0, 1.0)
                     color_indices = (norm_dist * 255).astype(np.uint8)
                     
                     # 使用向量化操作绘制点
